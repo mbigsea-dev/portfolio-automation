@@ -45,6 +45,8 @@ TARGET_ALLOCATION = {
     "현금": 20,
 }
 
+CASH_AVAILABLE = 1083934  # 토스 계좌 실제 보유 현금
+
 MONTHLY_INVESTMENT = 250000
 
 # 손절 기준
@@ -148,38 +150,35 @@ def calculate_portfolio_value():
 
     return {
         "총자산": total_value, "원금": total_cost, "수익": total_profit,
-        "수익률": total_profit_rate,
+        "수익률": total_profit_rate, "현금": CASH_AVAILABLE,
         "상세": portfolio_data, "카테고리별": category_totals,
     }
 
 def calculate_shannon_rebalancing(pv):
     """
-    섀넌 리밸런싱: 실제 보유 현금은 없으므로,
-    '주식 보유분(반도체/지수펀드/전력인프라)' 내에서의 목표 비중 편차를 계산.
-    TARGET_ALLOCATION의 현금 20%는 "신규 투자금 중 현금 보유 원칙"으로 별도 적용.
+    섀넌 리밸런싱: 현금(실보유)+주식 총액을 분모로,
+    TARGET_ALLOCATION(반도체40/지수30/전력10/현금20)을 그대로 목표비중으로 사용.
     """
-    total = pv["총자산"]  # 현재 보유 주식 총액 = 분모
-
-    # 현금을 제외한 주식 카테고리만 재정규화 (반도체40:지수30:전력10 -> 합80 기준 비율 유지)
-    stock_categories = {k: v for k, v in TARGET_ALLOCATION.items() if k != "현금"}
-    stock_total_pct = sum(stock_categories.values())  # 80
+    total = pv["총자산"] + pv["현금"]  # 전체 자산 = 주식 + 실제 현금
 
     category_analysis = []
-    for cat, target_pct in stock_categories.items():
-        normalized_target_pct = target_pct / stock_total_pct * 100  # 주식 내 비중으로 환산
-        target_value = total * (normalized_target_pct / 100)
-        current_value = pv["카테고리별"].get(cat, 0)
+    for cat, target_pct in TARGET_ALLOCATION.items():
+        if cat == "현금":
+            current_value = pv["현금"]
+        else:
+            current_value = pv["카테고리별"].get(cat, 0)
+        target_value = total * (target_pct / 100)
         deviation = current_value - target_value
-        deviation_pct = (current_value / total * 100) - normalized_target_pct if total > 0 else 0
+        deviation_pct = (current_value / total * 100) - target_pct if total > 0 else 0
         category_analysis.append({
-            "카테고리": cat, "목표비중": round(normalized_target_pct, 1),
+            "카테고리": cat, "목표비중": target_pct,
             "현재비중": round(current_value / total * 100, 1) if total > 0 else 0,
             "편차": round(deviation_pct, 1), "편차금액": round(deviation),
         })
 
     return {
         "카테고리분석": category_analysis,
-        "현금목표비중": TARGET_ALLOCATION["현금"],
+        "총자산포함현금": total,
     }
 
 def calculate_aggressive_rebalancing(pv):
@@ -284,10 +283,11 @@ def save_to_notion(pv, shannon, aggressive, stop_warnings):
         "parent": {"database_id": NOTION_DATABASE_ID},
         "properties": {
             "날짜": {"title": [{"text": {"content": datetime.now().strftime("%Y-%m-%d")}}]},
-            "총자산": {"number": round(pv["총자산"])},
+            "총자산": {"number": round(pv["총자산"] + pv["현금"])},
             "수익률": {"number": round(pv["수익률"], 2)},
             "일간수익": {"number": round(sum(i["평가금"] * i["일간등락"] / 100 for i in pv["상세"]))},
             "반도체비중": {"number": next((c["현재비중"] for c in shannon["카테고리분석"] if c["카테고리"] == "반도체"), 0)},
+            "현금비중": {"number": next((c["현재비중"] for c in shannon["카테고리분석"] if c["카테고리"] == "현금"), 0)},
             "리밸런싱제안": {"rich_text": [{"text": {"content": rebalancing_text[:2000]}}]},
             "공격리밸런싱대상": {"rich_text": [{"text": {"content": aggressive_text[:2000]}}]},
             "손절경고": {"rich_text": [{"text": {"content": stop_loss_text[:2000]}}]},
@@ -311,37 +311,46 @@ def send_telegram_message(pv, shannon, aggressive, stop_warnings, news, psycholo
 
     today = datetime.now().strftime("%Y년 %m월 %d일 (%a)")
     daily_pl = sum(i["평가금"] * i["일간등락"] / 100 for i in pv["상세"])
-    total = pv["총자산"]
+    total_with_cash = pv["총자산"] + pv["현금"]
 
-    msg = "━━━━━━━━━━\n"
+    msg = "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
     msg += f"📊 Hyunwoo 포트폴리오 | {today}\n"
-    msg += "━━━━━━━━━━\n\n"
+    msg += "━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
 
     # 1. 현황 요약
     msg += "💰 현황 요약\n"
-    msg += "───────\n"
-    msg += f"평가금: {pv['총자산']:,.0f}원\n"
+    msg += "─────────────────────\n"
+    msg += f"주식 평가금: {pv['총자산']:,.0f}원\n"
+    msg += f"현금 보유: {pv['현금']:,.0f}원\n"
+    msg += f"총자산: {total_with_cash:,.0f}원\n"
     msg += f"수익률: {pv['수익률']:.2f}% ({pv['수익']:,.0f}원)\n"
     msg += f"일간 수익: {daily_pl:,.0f}원\n\n"
 
-    # 2. 섀넌 리밸런싱 (종목별 상세 포함)
+    # 2. 섀넌 리밸런싱 (종목별 상세 포함, 현금 포함 총자산 기준)
     msg += "🎯 섀넌 리밸런싱 제안 (Claude 추천 배분 기준)\n"
-    msg += "──────────\n"
+    msg += "─────────────────────\n"
     for c in shannon["카테고리분석"]:
         emoji = "🔴" if abs(c["편차"]) > 5 else "🟢"
         msg += f"{emoji} {c['카테고리']} (목표 {c['목표비중']}%)\n"
         msg += f"　└ 현재 {c['현재비중']}% | 편차 {c['편차']:+.1f}%\n"
+        if c["카테고리"] == "현금":
+            continue
         cat_items = [i for i in pv["상세"] if i["카테고리"] == c["카테고리"]]
         for item in cat_items:
-            item_pct = round(item["평가금"] / total * 100, 1) if total > 0 else 0
+            item_pct = round(item["평가금"] / total_with_cash * 100, 1) if total_with_cash > 0 else 0
             msg += f"　　- {item['종목']}: {item_pct}% ({item['수익률']:+.1f}%)\n"
-    msg += f"\n💵 현금 원칙: 신규 투자금의 {shannon['현금목표비중']}%는 현금으로 보유 권장\n\n"
+    msg += "\n"
 
     # 3. 오늘의 액션 아이템 (바로 실행 가능하도록 구체적으로)
     msg += "🎯 오늘의 액션 아이템\n"
-    msg += "──────────\n"
+    msg += "─────────────────────\n"
     action_num = 1
     for c in shannon["카테고리분석"]:
+        if c["카테고리"] == "현금":
+            if c["편차"] < -5:
+                msg += f"{action_num}. [현금 확보] 현금 비중 부족 (편차 {c['편차']:+.1f}%) → 매도 시 일부는 현금으로 남겨두기\n"
+                action_num += 1
+            continue
         if c["편차"] < -5:
             msg += f"{action_num}. [매수 검토] {c['카테고리']} 비중 부족 (편차 {c['편차']:+.1f}%) → 월 투자금 우선 배분\n"
             action_num += 1
@@ -356,21 +365,21 @@ def send_telegram_message(pv, shannon, aggressive, stop_warnings, news, psycholo
     # 4. 손절 경고
     if stop_warnings:
         msg += "🚨 손절 경고\n"
-        msg += "──────────\n"
+        msg += "─────────────────────\n"
         for w in stop_warnings:
             msg += f"🚨 {w}\n"
         msg += "(한국전력·HLB는 연말 보유 방침에 따라 제외)\n\n"
 
     # 5. 심리적 대처 안내
     msg += "🧠 오늘의 심리 코칭\n"
-    msg += "──────────\n"
+    msg += "─────────────────────\n"
     for note in psychology_notes:
         msg += f"{note}\n\n"
 
     # 6. 뉴스
     if news:
         msg += "📰 주요 뉴스 (변동폭 큰 종목 위주)\n"
-        msg += "──────────\n"
+        msg += "─────────────────────\n"
         for stock_name, titles in news.items():
             msg += f"[{stock_name}]\n"
             for t in titles:
@@ -379,7 +388,7 @@ def send_telegram_message(pv, shannon, aggressive, stop_warnings, news, psycholo
 
     # 7. 공격적 리밸런싱 후보 (맨 아래)
     msg += "⚡ 공격적 리밸런싱 후보 (15%+ 변동)\n"
-    msg += "──────────\n"
+    msg += "─────────────────────\n"
     if aggressive:
         for c in aggressive:
             msg += f"⚡ {c['종목']}: {c['수익률']:+.1f}% → {c['제안']}\n"
@@ -388,7 +397,7 @@ def send_telegram_message(pv, shannon, aggressive, stop_warnings, news, psycholo
     msg += "\n"
 
     # 8. 매매 기록 안내 (자동 반영은 안 되지만 기록 유도)
-    msg += "──────────\n"
+    msg += "─────────────────────\n"
     msg += "💡 오늘 매수/매도하셨다면 이 방에 기록해두세요.\n"
     msg += "(자동 반영은 안 되니, GitHub의 portfolio_automation.py에서 수동으로 수정해주세요)"
 
