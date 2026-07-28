@@ -61,10 +61,17 @@ HOLD_UNTIL_YEAREND = ["한국전력", "HLB"]
 
 def get_korean_stock_price(ticker):
     try:
-        today = datetime.now().strftime("%Y%m%d")
-        data = stock.get_market_ohlcv(today, today, ticker)
+        end = datetime.now().strftime("%Y%m%d")
+        start = (datetime.now() - pd.Timedelta(days=10)).strftime("%Y%m%d")
+        data = stock.get_market_ohlcv(start, end, ticker)
+        data = data[data["종가"] > 0]
         if len(data) > 0:
-            return {"price": int(data["종가"].iloc[-1]), "change_pct": float(data["등락률"].iloc[-1])}
+            price = int(data["종가"].iloc[-1])
+            change = float(data["등락률"].iloc[-1])
+            if abs(change) > 50:
+                print(f"경고: {ticker} 등락률 이상치 감지 ({change}%), 0으로 처리")
+                change = 0.0
+            return {"price": price, "change_pct": change}
     except Exception as e:
         print(f"Error fetching {ticker}: {e}")
     return None
@@ -248,33 +255,56 @@ def send_telegram_message(pv, shannon, aggressive, stop_warnings):
 
     today = datetime.now().strftime("%Y-%m-%d (%a)")
     daily_pl = sum(i["평가금"] * i["일간등락"] / 100 for i in pv["상세"])
+    total_with_cash = pv["총자산"] + pv["현금"]
 
-    msg = f"*포트폴리오 아침 보고서* | {today}\n\n"
-    msg += f"총자산: {pv['총자산']:,.0f}원\n"
+    msg = f"포트폴리오 아침 보고서 | {today}\n\n"
+
+    msg += "현황 요약\n"
+    msg += f"평가금: {pv['총자산']:,.0f}원\n"
     msg += f"수익률: {pv['수익률']:.2f}% ({pv['수익']:,.0f}원)\n"
-    msg += f"일간: {daily_pl:,.0f}원\n\n"
+    msg += f"일간 수익: {daily_pl:,.0f}원\n"
+    msg += f"현금 여유: {pv['현금']:,.0f}원\n\n"
 
-    msg += "*섀넌 리밸런싱 (카테고리별 편차)*\n"
+    msg += "섀넌 리밸런싱 제안\n"
     for c in shannon["카테고리분석"]:
         emoji = "🔴" if abs(c["편차"]) > 5 else "🟢"
-        msg += f"{emoji} {c['카테고리']}: {c['현재비중']}% (목표 {c['목표비중']}%, 편차 {c['편차']:+.1f}%)\n"
+        msg += f"{emoji} {c['카테고리']} (목표 {c['목표비중']}%)\n"
+        msg += f"　현재 {c['현재비중']}% | 편차 {c['편차']:+.1f}%\n"
+        cat_items = [i for i in pv["상세"] if i["카테고리"] == c["카테고리"]]
+        for item in cat_items:
+            item_pct = round(item["평가금"] / total_with_cash * 100, 1)
+            msg += f"　　- {item['종목']}: {item_pct}%\n"
     msg += "\n"
 
-    msg += "*공격적 리밸런싱 후보 (15%+ 변동)*\n"
-    if aggressive:
-        for c in aggressive:
-            msg += f"⚡ {c['종목']}: {c['수익률']:+.1f}% → {c['제안']}\n"
-    else:
-        msg += "해당 종목 없음\n"
+    msg += "오늘의 액션 아이템\n"
+    action_items = []
+    for c in shannon["카테고리분석"]:
+        if c["편차"] < -5:
+            action_items.append(f"{c['카테고리']} 비중 부족 -> 추가 매수 검토 (편차 {c['편차']:+.1f}%)")
+        elif c["편차"] > 5:
+            action_items.append(f"{c['카테고리']} 비중 초과 -> 일부 매도 검토 (편차 {c['편차']:+.1f}%)")
+    if not action_items:
+        action_items.append("현재 목표 배분과 크게 벗어나지 않음, 모니터링 유지")
+    action_items.append(f"월 정기투자 {MONTHLY_INVESTMENT:,.0f}원 -> 편차 가장 큰 카테고리에 배분")
+    for a in action_items:
+        msg += f"- {a}\n"
     msg += "\n"
 
     if stop_warnings:
-        msg += "*손절 경고*\n"
+        msg += "손절 경고\n"
         for w in stop_warnings:
             msg += f"🚨 {w}\n"
+        msg += "\n"
+
+    msg += "공격적 리밸런싱 후보 (15%+ 변동)\n"
+    if aggressive:
+        for c in aggressive:
+            msg += f"⚡ {c['종목']}: {c['수익률']:+.1f}% -> {c['제안']}\n"
+    else:
+        msg += "해당 종목 없음\n"
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    resp = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"})
+    resp = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg})
 
     if resp.status_code == 200:
         print("Telegram 발송 완료")
