@@ -252,6 +252,7 @@ def get_market_psychology_note(pv, shannon):
             "편차가 큰 쪽부터 나눠서 채워가는 방식을 권합니다."
         )
     return notes
+def check_stop_loss(pv):
     """손절 경고 체크 (연말 보유 예외 종목 제외)"""
     warnings = []
     for item in pv["상세"]:
