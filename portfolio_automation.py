@@ -328,7 +328,7 @@ def send_telegram_message(pv, shannon, aggressive, stop_warnings, news, psycholo
 
     # 2. 섀넌 리밸런싱 (종목별 상세 포함, 현금 포함 총자산 기준)
     msg += "🎯 섀넌 리밸런싱 제안 (Claude 추천 배분 기준)\n"
-    msg += ───────────\n"
+    msg += "───────────\n"
     for c in shannon["카테고리분석"]:
         emoji = "🔴" if abs(c["편차"]) > 5 else "🟢"
         msg += f"{emoji} {c['카테고리']} (목표 {c['목표비중']}%)\n"
