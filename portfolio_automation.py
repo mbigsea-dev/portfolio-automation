@@ -313,13 +313,13 @@ def send_telegram_message(pv, shannon, aggressive, stop_warnings, news, psycholo
     daily_pl = sum(i["평가금"] * i["일간등락"] / 100 for i in pv["상세"])
     total_with_cash = pv["총자산"] + pv["현금"]
 
-    msg = "━━━━━━━━━━━━\n"
+    msg = "=========================\n"
     msg += f"📊 Hyunwoo 포트폴리오 | {today}\n"
-    msg += "━━━━━━━━━━━\n\n"
+    msg += "=========================\n\n"
 
     # 1. 현황 요약
     msg += "💰 현황 요약\n"
-    msg += "───────────\n"
+    msg += "---------------------\n"
     msg += f"주식 평가금: {pv['총자산']:,.0f}원\n"
     msg += f"현금 보유: {pv['현금']:,.0f}원\n"
     msg += f"총자산: {total_with_cash:,.0f}원\n"
@@ -328,22 +328,22 @@ def send_telegram_message(pv, shannon, aggressive, stop_warnings, news, psycholo
 
     # 2. 섀넌 리밸런싱 (종목별 상세 포함, 현금 포함 총자산 기준)
     msg += "🎯 섀넌 리밸런싱 제안 (Claude 추천 배분 기준)\n"
-    msg += "───────────\n"
+    msg += "---------------------\n"
     for c in shannon["카테고리분석"]:
         emoji = "🔴" if abs(c["편차"]) > 5 else "🟢"
         msg += f"{emoji} {c['카테고리']} (목표 {c['목표비중']}%)\n"
-        msg += f"　└ 현재 {c['현재비중']}% | 편차 {c['편차']:+.1f}%\n"
+        msg += f"  - 현재 {c['현재비중']}% | 편차 {c['편차']:+.1f}%\n"
         if c["카테고리"] == "현금":
             continue
         cat_items = [i for i in pv["상세"] if i["카테고리"] == c["카테고리"]]
         for item in cat_items:
             item_pct = round(item["평가금"] / total_with_cash * 100, 1) if total_with_cash > 0 else 0
-            msg += f"　　- {item['종목']}: {item_pct}% ({item['수익률']:+.1f}%)\n"
+            msg += f"    - {item['종목']}: {item_pct}% ({item['수익률']:+.1f}%)\n"
     msg += "\n"
 
     # 3. 오늘의 액션 아이템 (바로 실행 가능하도록 구체적으로)
     msg += "🎯 오늘의 액션 아이템\n"
-    msg += "───────────\n"
+    msg += "---------------------\n"
     action_num = 1
     for c in shannon["카테고리분석"]:
         if c["카테고리"] == "현금":
@@ -365,30 +365,30 @@ def send_telegram_message(pv, shannon, aggressive, stop_warnings, news, psycholo
     # 4. 손절 경고
     if stop_warnings:
         msg += "🚨 손절 경고\n"
-        msg += "───────────\n"
+        msg += "---------------------\n"
         for w in stop_warnings:
             msg += f"🚨 {w}\n"
         msg += "(한국전력·HLB는 연말 보유 방침에 따라 제외)\n\n"
 
     # 5. 심리적 대처 안내
     msg += "🧠 오늘의 심리 코칭\n"
-    msg += "───────────\n"
+    msg += "---------------------\n"
     for note in psychology_notes:
         msg += f"{note}\n\n"
 
     # 6. 뉴스
     if news:
         msg += "📰 주요 뉴스 (변동폭 큰 종목 위주)\n"
-        msg += "───────────\n"
+        msg += "---------------------\n"
         for stock_name, titles in news.items():
             msg += f"[{stock_name}]\n"
             for t in titles:
-                msg += f"　- {t}\n"
+                msg += f"  - {t}\n"
         msg += "\n"
 
     # 7. 공격적 리밸런싱 후보 (맨 아래)
     msg += "⚡ 공격적 리밸런싱 후보 (15%+ 변동)\n"
-    msg += ───────────\n"
+    msg += "---------------------\n"
     if aggressive:
         for c in aggressive:
             msg += f"⚡ {c['종목']}: {c['수익률']:+.1f}% → {c['제안']}\n"
@@ -397,7 +397,7 @@ def send_telegram_message(pv, shannon, aggressive, stop_warnings, news, psycholo
     msg += "\n"
 
     # 8. 매매 기록 안내 (자동 반영은 안 되지만 기록 유도)
-    msg += "───────────\n"
+    msg += "---------------------\n"
     msg += "💡 오늘 매수/매도하셨다면 이 방에 기록해두세요.\n"
     msg += "(자동 반영은 안 되니, GitHub의 portfolio_automation.py에서 수동으로 수정해주세요)"
 
