@@ -45,12 +45,35 @@ TARGET_ALLOCATION = {
     "현금": 20,
 }
 
-CASH_AVAILABLE = 1083934  # 토스 계좌 실제 보유 현금
+CASH_AVAILABLE = 3083934  # 토스 계좌 실제 보유 현금 (2026-07-30 기준)
 
 MONTHLY_INVESTMENT = 250000
 
 # 손절 기준
-STOP_LOSS_NORMAL = -15  # 일반 변동성 장
+# - 개별 반도체주(SK하이닉스/삼성전자/한미반도체): 연변동성 45% 가정 시 -15%는
+#   기업 이슈 없이도 75% 확률로 도달하는 노이즈 수준(자체 시뮬레이션 검증).
+#   -30%로 현실화해서 "진짜 지킬 수 있는 기준"으로 설정.
+# - 지수펀드(KODEX 200): 분산자산이라 변동성이 낮음, 기존 -15% 유지.
+STOP_LOSS_BY_STOCK = {
+    "SK하이닉스": -30,
+    "삼성전자": -30,
+    "한미반도체": -30,
+    "KODEX 200": -15,
+}
+STOP_LOSS_DEFAULT = -15  # 위 표에 없는 종목의 기본값
+
+# 트레일링 스탑 기준 (익절 타이밍 자동 방어)
+# - 반도체 개별주: 최고 수익률 대비 15%p 하락하면 트레일링 스탑 발동
+# - HLB: 연말 보유 예외지만, +20% 재도달 시에는 10%p로 타이트하게 전환
+#   (과거 +20%에서 못 팔고 급락으로 물린 경험 반영)
+TRAILING_STOP_BY_STOCK = {
+    "SK하이닉스": 15,
+    "삼성전자": 15,
+    "한미반도체": 15,
+    "HLB": 10,  # 단, +20% 이상 도달했을 때만 활성화 (아래 로직에서 처리)
+}
+HLB_TRAILING_ACTIVATION_PROFIT = 20  # HLB가 이 수익률을 넘으면 트레일링 스탑 활성화
+
 VOLATILITY_THRESHOLD = 25  # 최근 변동폭이 이 이상이면 "고변동성 장"으로 판단
 
 # 공격적 리밸런싱 기준
@@ -59,6 +82,23 @@ AGGRESSIVE_VOLATILITY_MIN = 20
 
 # 보유 예외 종목 (연말까지 유지, 자동 손절 로직에서 제외)
 HOLD_UNTIL_YEAREND = ["한국전력", "HLB"]
+
+def get_rebalance_band(target_pct, category=None):
+    """
+    5/25 Rule: 목표비중이 20% 이상이면 절대 5%p 밴드,
+    20% 미만이면 목표치의 상대 25% 밴드를 적용.
+    (Swedroe 5/25 Rule, Bogleheads 표준 관행 반영)
+
+    보정: 반도체 카테고리는 내부 4종목(SK하이닉스/삼성전자/HLB/한미반도체)이
+    같은 업종 매크로 요인에 함께 반응해 상관계수가 높다(추정 0.8+).
+    분산투자처럼 보이지만 실질 리스크는 집중에 가까우므로,
+    표준 밴드보다 타이트한 4%p를 적용해 더 자주 점검하도록 함.
+    """
+    if category == "반도체":
+        return 4.0
+    if target_pct >= 20:
+        return 5.0
+    return round(target_pct * 0.25, 1)
 
 # ==================== 데이터 조회 함수 ====================
 
@@ -158,6 +198,7 @@ def calculate_shannon_rebalancing(pv):
     """
     섀넌 리밸런싱: 현금(실보유)+주식 총액을 분모로,
     TARGET_ALLOCATION(반도체40/지수30/전력10/현금20)을 그대로 목표비중으로 사용.
+    5/25 Rule 적용: 목표 20% 이상은 절대 5%p, 20% 미만은 상대 25% 밴드로 이탈 여부 판단.
     """
     total = pv["총자산"] + pv["현금"]  # 전체 자산 = 주식 + 실제 현금
 
@@ -170,16 +211,54 @@ def calculate_shannon_rebalancing(pv):
         target_value = total * (target_pct / 100)
         deviation = current_value - target_value
         deviation_pct = (current_value / total * 100) - target_pct if total > 0 else 0
+        band = get_rebalance_band(target_pct, category=cat)
         category_analysis.append({
             "카테고리": cat, "목표비중": target_pct,
             "현재비중": round(current_value / total * 100, 1) if total > 0 else 0,
             "편차": round(deviation_pct, 1), "편차금액": round(deviation),
+            "밴드": band, "밴드이탈": abs(deviation_pct) > band,
         })
 
     return {
         "카테고리분석": category_analysis,
         "총자산포함현금": total,
     }
+
+def calculate_share_level_suggestions(pv, shannon):
+    """
+    카테고리별 편차금액을, 해당 카테고리 내 종목들의 평가금 비중대로 비례 배분해서
+    몇 주를 사고팔아야 하는지 구체적으로 계산.
+    """
+    suggestions = []
+    for c in shannon["카테고리분석"]:
+        if c["카테고리"] == "현금":
+            continue
+        if not c["밴드이탈"]:
+            continue  # 5/25 Rule 밴드 이내는 액션 불필요
+
+        cat_items = [i for i in pv["상세"] if i["카테고리"] == c["카테고리"]]
+        cat_total_value = sum(i["평가금"] for i in cat_items)
+        if cat_total_value == 0:
+            continue
+
+        for item in cat_items:
+            if item["종목"] in HOLD_UNTIL_YEAREND:
+                continue  # 연말 보유 방침 종목은 매수/매도 제안에서 제외
+            weight = item["평가금"] / cat_total_value
+            item_deviation_value = c["편차금액"] * weight
+            shares_to_trade = round(item_deviation_value / item["현재가"]) if item["현재가"] > 0 else 0
+
+            if shares_to_trade == 0:
+                continue
+
+            action = "매도" if shares_to_trade > 0 else "매수"
+            suggestions.append({
+                "카테고리": c["카테고리"], "종목": item["종목"],
+                "액션": action, "주수": abs(shares_to_trade),
+                "현재가": item["현재가"],
+                "금액": abs(shares_to_trade) * item["현재가"],
+            })
+    return suggestions
 
 def calculate_aggressive_rebalancing(pv):
     """공격적 리밸런싱: 변동성 상위 종목 중 ±15% 이상 움직인 종목 자동 선정"""
@@ -252,18 +331,106 @@ def get_market_psychology_note(pv, shannon):
         )
     return notes
 def check_stop_loss(pv):
-    """손절 경고 체크 (연말 보유 예외 종목 제외)"""
+    """손절 경고 체크 (연말 보유 예외 종목 제외, 종목별 손절 기준 개별 적용)"""
     warnings = []
     for item in pv["상세"]:
         if item["종목"] in HOLD_UNTIL_YEAREND:
             continue
-        if item["수익률"] <= STOP_LOSS_NORMAL:
-            warnings.append(f"{item['종목']}: {item['수익률']:.1f}% (기준 {STOP_LOSS_NORMAL}% 도달)")
+        threshold = STOP_LOSS_BY_STOCK.get(item["종목"], STOP_LOSS_DEFAULT)
+        if item["수익률"] <= threshold:
+            warnings.append(f"{item['종목']}: {item['수익률']:.1f}% (기준 {threshold}% 도달)")
     return warnings
+
+def is_quarterly_review_window():
+    """
+    분기 시작일(1/1, 4/1, 7/1, 10/1)로부터 3영업일 이내인지 확인.
+    이 기간에는 손절 대상 종목의 기준 자체를 재검토하라는 안내를 추가로 띄움.
+    """
+    today = datetime.now()
+    quarter_starts = [(1, 1), (4, 1), (7, 1), (10, 1)]
+    for month, day in quarter_starts:
+        q_start = datetime(today.year, month, day)
+        delta = (today - q_start).days
+        if 0 <= delta <= 3:
+            return True
+    return False
+
+def get_quarterly_review_note(stop_warnings):
+    """분기 재검토 시점이고 손절 대상이 있으면 재검토 안내 문구 생성"""
+    if not stop_warnings or not is_quarterly_review_window():
+        return None
+    return (
+        "분기 시작 시점입니다. 손절 기준에 걸린 종목들을 오늘 감정적으로 판단하지 말고, "
+        "다음 관점에서 한 번씩 재검토해보세요: "
+        "1) 이 종목을 지금 처음 본다면 이 가격에 사겠는가, "
+        "2) 손실 원인이 종목 개별 이슈인가 업종 전체 흐름인가, "
+        "3) 손절 기준 자체가 지금 변동성 국면에서도 여전히 타당한가."
+    )
+
+# ==================== 트레일링 스탑 (최고 수익률 추적) ====================
+
+PEAK_RECORD_FILE = "peak_profit_record.json"
+
+def load_peak_records():
+    """종목별 역대 최고 수익률 기록 로드 (파일이 없으면 빈 딕셔너리)"""
+    try:
+        with open(PEAK_RECORD_FILE, "r", encoding="utf-8") as f:
+            import json
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        print(f"최고 수익률 기록 로드 실패: {e}")
+        return {}
+
+def save_peak_records(records):
+    """종목별 역대 최고 수익률 기록 저장"""
+    try:
+        import json
+        with open(PEAK_RECORD_FILE, "w", encoding="utf-8") as f:
+            json.dump(records, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"최고 수익률 기록 저장 실패: {e}")
+
+def check_trailing_stop(pv):
+    """
+    트레일링 스탑 체크: 종목별 역대 최고 수익률을 기록해두고,
+    거기서 설정된 폭(%p)만큼 하락하면 익절 경고를 발생.
+    HLB는 +20% 이상 도달했던 적이 있어야만 트레일링 스탑이 활성화됨.
+    """
+    records = load_peak_records()
+    trailing_warnings = []
+
+    for item in pv["상세"]:
+        name = item["종목"]
+        cur_profit = item["수익률"]
+
+        prev_peak = records.get(name, cur_profit)
+        new_peak = max(prev_peak, cur_profit)
+        records[name] = new_peak
+
+        if name == "HLB":
+            if new_peak < HLB_TRAILING_ACTIVATION_PROFIT:
+                continue  # 아직 +20%를 넘은 적이 없으면 트레일링 스탑 비활성
+            drop_pct = TRAILING_STOP_BY_STOCK.get("HLB", 10)
+        elif name in TRAILING_STOP_BY_STOCK:
+            drop_pct = TRAILING_STOP_BY_STOCK[name]
+        else:
+            continue  # 트레일링 스탑 미적용 종목
+
+        drawdown_from_peak = new_peak - cur_profit
+        if drawdown_from_peak >= drop_pct:
+            trailing_warnings.append(
+                f"{name}: 최고 수익률 {new_peak:+.1f}% 대비 {drawdown_from_peak:.1f}%p 하락 "
+                f"(현재 {cur_profit:+.1f}%, 트레일링 스탑 {drop_pct}%p 도달)"
+            )
+
+    save_peak_records(records)
+    return trailing_warnings
 
 # ==================== Notion 저장 ====================
 
-def save_to_notion(pv, shannon, aggressive, stop_warnings):
+def save_to_notion(pv, shannon, aggressive, stop_warnings, trailing_warnings):
     if not NOTION_TOKEN or not NOTION_DATABASE_ID:
         print("Notion 설정 없음, 스킵")
         return False
@@ -275,9 +442,10 @@ def save_to_notion(pv, shannon, aggressive, stop_warnings):
         "Notion-Version": "2022-06-28",
     }
 
-    rebalancing_text = " / ".join([f"{c['카테고리']}: {c['편차']:+.1f}%" for c in shannon["카테고리분석"]])
+    rebalancing_text = " / ".join([f"{c['카테고리']}: {c['편차']:+.1f}% (밴드±{c['밴드']}%p, {'이탈' if c['밴드이탈'] else '정상'})" for c in shannon["카테고리분석"]])
     aggressive_text = " / ".join([f"{c['종목']}({c['수익률']:+.1f}%): {c['제안']}" for c in aggressive]) if aggressive else "해당 없음"
     stop_loss_text = " / ".join(stop_warnings) if stop_warnings else "없음"
+    trailing_text = " / ".join(trailing_warnings) if trailing_warnings else "없음"
 
     payload = {
         "parent": {"database_id": NOTION_DATABASE_ID},
@@ -291,6 +459,7 @@ def save_to_notion(pv, shannon, aggressive, stop_warnings):
             "리밸런싱제안": {"rich_text": [{"text": {"content": rebalancing_text[:2000]}}]},
             "공격리밸런싱대상": {"rich_text": [{"text": {"content": aggressive_text[:2000]}}]},
             "손절경고": {"rich_text": [{"text": {"content": stop_loss_text[:2000]}}]},
+            "트레일링스탑": {"rich_text": [{"text": {"content": trailing_text[:2000]}}]},
         }
     }
 
@@ -304,7 +473,7 @@ def save_to_notion(pv, shannon, aggressive, stop_warnings):
 
 # ==================== Telegram 발송 ====================
 
-def send_telegram_message(pv, shannon, aggressive, stop_warnings, news, psychology_notes):
+def send_telegram_message(pv, shannon, aggressive, stop_warnings, trailing_warnings, news, psychology_notes):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("Telegram 설정 없음, 스킵")
         return False
@@ -330,8 +499,8 @@ def send_telegram_message(pv, shannon, aggressive, stop_warnings, news, psycholo
     msg += "🎯 섀넌 리밸런싱 제안 (Claude 추천 배분 기준)\n"
     msg += "---------------------\n"
     for c in shannon["카테고리분석"]:
-        emoji = "🔴" if abs(c["편차"]) > 5 else "🟢"
-        msg += f"{emoji} {c['카테고리']} (목표 {c['목표비중']}%)\n"
+        emoji = "🔴" if c["밴드이탈"] else "🟢"
+        msg += f"{emoji} {c['카테고리']} (목표 {c['목표비중']}%, 밴드 ±{c['밴드']}%p)\n"
         msg += f"  - 현재 {c['현재비중']}% | 편차 {c['편차']:+.1f}%\n"
         if c["카테고리"] == "현금":
             continue
@@ -341,22 +510,19 @@ def send_telegram_message(pv, shannon, aggressive, stop_warnings, news, psycholo
             msg += f"    - {item['종목']}: {item_pct}% ({item['수익률']:+.1f}%) 현재가 {item['현재가']:,.0f}원\n"
     msg += "\n"
 
-    # 3. 오늘의 액션 아이템 (바로 실행 가능하도록 구체적으로)
+    # 3. 오늘의 액션 아이템 (구체적 매수/매도 주식수 제시)
     msg += "🎯 오늘의 액션 아이템\n"
     msg += "---------------------\n"
+    share_suggestions = calculate_share_level_suggestions(pv, shannon)
     action_num = 1
-    for c in shannon["카테고리분석"]:
-        if c["카테고리"] == "현금":
-            if c["편차"] < -5:
-                msg += f"{action_num}. [현금 확보] 현금 비중 부족 (편차 {c['편차']:+.1f}%) → 매도 시 일부는 현금으로 남겨두기\n"
-                action_num += 1
-            continue
-        if c["편차"] < -5:
-            msg += f"{action_num}. [매수 검토] {c['카테고리']} 비중 부족 (편차 {c['편차']:+.1f}%) → 월 투자금 우선 배분\n"
+    if share_suggestions:
+        for s in share_suggestions:
+            msg += f"{action_num}. [{s['액션']} 검토] {s['종목']} {s['주수']}주 (약 {s['금액']:,.0f}원, 현재가 {s['현재가']:,.0f}원)\n"
             action_num += 1
-        elif c["편차"] > 5:
-            msg += f"{action_num}. [매도 검토] {c['카테고리']} 비중 초과 (편차 {c['편차']:+.1f}%) → 일부 차익 실현 고려\n"
-            action_num += 1
+    cash_cat = next((c for c in shannon["카테고리분석"] if c["카테고리"] == "현금"), None)
+    if cash_cat and cash_cat["밴드이탈"] and cash_cat["편차"] < 0:
+        msg += f"{action_num}. [현금 확보] 현금 비중 부족 (편차 {cash_cat['편차']:+.1f}%) → 매도 시 일부는 현금으로 남겨두기\n"
+        action_num += 1
     if action_num == 1:
         msg += f"{action_num}. [유지] 목표 배분과 크게 벗어나지 않음, 모니터링만 유지\n"
         action_num += 1
@@ -368,7 +534,19 @@ def send_telegram_message(pv, shannon, aggressive, stop_warnings, news, psycholo
         msg += "---------------------\n"
         for w in stop_warnings:
             msg += f"🚨 {w}\n"
-        msg += "(한국전력·HLB는 연말 보유 방침에 따라 제외)\n\n"
+        msg += "(한국전력·HLB는 연말 보유 방침에 따라 제외)\n"
+        quarterly_note = get_quarterly_review_note(stop_warnings)
+        if quarterly_note:
+            msg += f"\n📅 분기 재검토: {quarterly_note}\n"
+        msg += "\n"
+
+    # 4-1. 트레일링 스탑 (익절 타이밍 자동 방어)
+    if trailing_warnings:
+        msg += "📈 트레일링 스탑 발동 (익절 검토)\n"
+        msg += "---------------------\n"
+        for w in trailing_warnings:
+            msg += f"📈 {w}\n"
+        msg += "최고점 대비 정해둔 폭만큼 빠졌습니다. 추가 하락 전 일부 익절을 검토하세요.\n\n"
 
     # 5. 심리적 대처 안내
     msg += "🧠 오늘의 심리 코칭\n"
@@ -386,17 +564,7 @@ def send_telegram_message(pv, shannon, aggressive, stop_warnings, news, psycholo
                 msg += f"  - {t}\n"
         msg += "\n"
 
-    # 7. 공격적 리밸런싱 후보 (맨 아래)
-    msg += "⚡ 공격적 리밸런싱 후보 (15%+ 변동)\n"
-    msg += "---------------------\n"
-    if aggressive:
-        for c in aggressive:
-            msg += f"⚡ {c['종목']}: {c['수익률']:+.1f}% → {c['제안']}\n"
-    else:
-        msg += "해당 종목 없음\n"
-    msg += "\n"
-
-    # 8. 매매 기록 안내 (자동 반영은 안 되지만 기록 유도)
+    # 7. 매매 기록 안내 (자동 반영은 안 되지만 기록 유도)
     msg += "---------------------\n"
     msg += "💡 오늘 매수/매도하셨다면 이 방에 기록해두세요.\n"
     msg += "(자동 반영은 안 되니, GitHub의 portfolio_automation.py에서 수동으로 수정해주세요)"
@@ -420,10 +588,11 @@ if __name__ == "__main__":
     shannon = calculate_shannon_rebalancing(pv)
     aggressive = calculate_aggressive_rebalancing(pv)
     stop_warnings = check_stop_loss(pv)
+    trailing_warnings = check_trailing_stop(pv)
     news = collect_all_news(pv)
     psychology_notes = get_market_psychology_note(pv, shannon)
 
-    save_to_notion(pv, shannon, aggressive, stop_warnings)
-    send_telegram_message(pv, shannon, aggressive, stop_warnings, news, psychology_notes)
+    save_to_notion(pv, shannon, aggressive, stop_warnings, trailing_warnings)
+    send_telegram_message(pv, shannon, aggressive, stop_warnings, trailing_warnings, news, psychology_notes)
 
     print("완료")
