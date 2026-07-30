@@ -338,7 +338,7 @@ def send_telegram_message(pv, shannon, aggressive, stop_warnings, news, psycholo
         cat_items = [i for i in pv["상세"] if i["카테고리"] == c["카테고리"]]
         for item in cat_items:
             item_pct = round(item["평가금"] / total_with_cash * 100, 1) if total_with_cash > 0 else 0
-            msg += f"    - {item['종목']}: {item_pct}% ({item['수익률']:+.1f}%)\n"
+            msg += f"    - {item['종목']}: {item_pct}% ({item['수익률']:+.1f}%) 현재가 {item['현재가']:,.0f}원\n"
     msg += "\n"
 
     # 3. 오늘의 액션 아이템 (바로 실행 가능하도록 구체적으로)
