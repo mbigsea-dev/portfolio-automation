@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Hyunwoo 포트폴리오 자동화 시스템 v2.0
-- 매일 아침 7시 실행 (GitHub Actions)
+- 매일 아침 8시 실행 (GitHub Actions)
 - pykrx (한국주식), yfinance (해외주식)
 - 섀넌 리밸런싱 (안정형) + 공격적 리밸런싱 (15% 기준, 변동성 자동 선정)
 - Notion 데이터베이스 저장 + Telegram 메시지 발송
