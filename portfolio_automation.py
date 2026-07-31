@@ -38,7 +38,6 @@ PORTFOLIO = {
     "한국전력": {"ticker": "015760", "shares": 137, "purchase_price": 44079, "country": "KR", "category": "전력인프라"},
     "삼성전자": {"ticker": "005930", "shares": 13, "purchase_price": 327538, "country": "KR", "category": "반도체"},
     "HLB": {"ticker": "028300", "shares": 75, "purchase_price": 42953, "country": "KR", "category": "반도체"},
-    "한미반도체": {"ticker": "042700", "shares": 5, "purchase_price": 212100, "country": "KR", "category": "반도체"},
 }
 
 # 목표 자산 배분 (%) - Claude 추천안
@@ -51,19 +50,18 @@ TARGET_ALLOCATION = {
     "현금": 20,
 }
 
-CASH_AVAILABLE = 3083934  # 토스 계좌 실제 보유 현금 (2026-07-30 기준)
+CASH_AVAILABLE = 40030565  # 토스 계좌 실제 보유 현금 (2026-07-31 기준, 한미반도체 전량 손절 매도 반영)
 
 MONTHLY_INVESTMENT = 250000
 
 # 손절 기준
-# - 개별 반도체주(SK하이닉스/삼성전자/한미반도체): 연변동성 45% 가정 시 -15%는
+# - 개별 반도체주(SK하이닉스/삼성전자): 연변동성 45% 가정 시 -15%는
 #   기업 이슈 없이도 75% 확률로 도달하는 노이즈 수준(자체 시뮬레이션 검증).
 #   -30%로 현실화해서 "진짜 지킬 수 있는 기준"으로 설정.
 # - 지수펀드(KODEX 200): 분산자산이라 변동성이 낮음, 기존 -15% 유지.
 STOP_LOSS_BY_STOCK = {
     "SK하이닉스": -30,
     "삼성전자": -30,
-    "한미반도체": -30,
     "KODEX 200": -15,
 }
 STOP_LOSS_DEFAULT = -15  # 위 표에 없는 종목의 기본값
@@ -75,7 +73,6 @@ STOP_LOSS_DEFAULT = -15  # 위 표에 없는 종목의 기본값
 TRAILING_STOP_BY_STOCK = {
     "SK하이닉스": 15,
     "삼성전자": 15,
-    "한미반도체": 15,
     "HLB": 10,  # 단, +20% 이상 도달했을 때만 활성화 (아래 로직에서 처리)
 }
 HLB_TRAILING_ACTIVATION_PROFIT = 20  # HLB가 이 수익률을 넘으면 트레일링 스탑 활성화
@@ -95,7 +92,7 @@ def get_rebalance_band(target_pct, category=None):
     20% 미만이면 목표치의 상대 25% 밴드를 적용.
     (Swedroe 5/25 Rule, Bogleheads 표준 관행 반영)
 
-    보정: 반도체 카테고리는 내부 4종목(SK하이닉스/삼성전자/HLB/한미반도체)이
+    보정: 반도체 카테고리는 내부 3종목(SK하이닉스/삼성전자/HLB)이
     같은 업종 매크로 요인에 함께 반응해 상관계수가 높다(추정 0.8+).
     분산투자처럼 보이지만 실질 리스크는 집중에 가까우므로,
     표준 밴드보다 타이트한 4%p를 적용해 더 자주 점검하도록 함.
