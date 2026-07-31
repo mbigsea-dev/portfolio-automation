@@ -31,13 +31,46 @@ NOTION_DATABASE_ID = os.environ.get("NOTION_DATABASE_ID")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-# ==================== 포트폴리오 설정 ====================
+# ==================== 포트폴리오 설정 (종목당 한 블록으로 통합) ====================
+# 매매(매수/매도) 시 이 블록의 shares, purchase_price만 수정하면 됩니다.
+# 신규 종목 매수 시 같은 형식으로 한 줄 추가, 전량 매도 시 해당 줄 삭제하면 됩니다.
+#
+# 필드 설명:
+#   ticker           : 종목코드
+#   shares           : 보유 수량
+#   purchase_price   : 1주 평균 매입가
+#   country          : "KR"(pykrx) 또는 해외("yfinance")
+#   category         : 반도체/지수펀드/전력인프라 (TARGET_ALLOCATION과 매칭)
+#   stop_loss        : 개별 손절 기준(%). 미지정 시 STOP_LOSS_DEFAULT 적용
+#   trailing_stop    : 트레일링 스탑 폭(%p). 미지정 시 트레일링 스탑 미적용
+#   trailing_activation : 이 수익률(%) 이상 도달해야 트레일링 스탑 활성화 (HLB처럼 익절 구간에서만 걸고 싶을 때)
+#   hold_until_yearend : True면 연말까지 손절 로직에서 제외 (기존 방침 유지 종목)
 PORTFOLIO = {
-    "KODEX 200": {"ticker": "069500", "shares": 86, "purchase_price": 72276, "country": "KR", "category": "지수펀드"},
-    "SK하이닉스": {"ticker": "000660", "shares": 4, "purchase_price": 2474500, "country": "KR", "category": "반도체"},
-    "한국전력": {"ticker": "015760", "shares": 137, "purchase_price": 44079, "country": "KR", "category": "전력인프라"},
-    "삼성전자": {"ticker": "005930", "shares": 13, "purchase_price": 327538, "country": "KR", "category": "반도체"},
-    "HLB": {"ticker": "028300", "shares": 75, "purchase_price": 42953, "country": "KR", "category": "반도체"},
+    "KODEX 200": {
+        "ticker": "069500", "shares": 86, "purchase_price": 72276,
+        "country": "KR", "category": "지수펀드",
+        "stop_loss": -15,
+    },
+    "SK하이닉스": {
+        "ticker": "000660", "shares": 4, "purchase_price": 2474500,
+        "country": "KR", "category": "반도체",
+        "stop_loss": -30, "trailing_stop": 15,
+    },
+    "한국전력": {
+        "ticker": "015760", "shares": 137, "purchase_price": 44079,
+        "country": "KR", "category": "전력인프라",
+        "hold_until_yearend": True,
+    },
+    "삼성전자": {
+        "ticker": "005930", "shares": 13, "purchase_price": 327538,
+        "country": "KR", "category": "반도체",
+        "stop_loss": -30, "trailing_stop": 15,
+    },
+    "HLB": {
+        "ticker": "028300", "shares": 75, "purchase_price": 42953,
+        "country": "KR", "category": "반도체",
+        "hold_until_yearend": True, "trailing_stop": 10, "trailing_activation": 20,
+    },
 }
 
 # 목표 자산 배분 (%) - Claude 추천안
@@ -50,32 +83,15 @@ TARGET_ALLOCATION = {
     "현금": 20,
 }
 
-CASH_AVAILABLE = 40030565  # 토스 계좌 실제 보유 현금 (2026-07-31 기준, 한미반도체 전량 손절 매도 반영)
+CASH_AVAILABLE = 4030565  # 토스 계좌 실제 보유 현금 (2026-07-31 기준, 한미반도체 전량 손절 매도 반영)
 
 MONTHLY_INVESTMENT = 250000
 
-# 손절 기준
-# - 개별 반도체주(SK하이닉스/삼성전자): 연변동성 45% 가정 시 -15%는
-#   기업 이슈 없이도 75% 확률로 도달하는 노이즈 수준(자체 시뮬레이션 검증).
-#   -30%로 현실화해서 "진짜 지킬 수 있는 기준"으로 설정.
-# - 지수펀드(KODEX 200): 분산자산이라 변동성이 낮음, 기존 -15% 유지.
-STOP_LOSS_BY_STOCK = {
-    "SK하이닉스": -30,
-    "삼성전자": -30,
-    "KODEX 200": -15,
-}
-STOP_LOSS_DEFAULT = -15  # 위 표에 없는 종목의 기본값
-
-# 트레일링 스탑 기준 (익절 타이밍 자동 방어)
-# - 반도체 개별주: 최고 수익률 대비 15%p 하락하면 트레일링 스탑 발동
-# - HLB: 연말 보유 예외지만, +20% 재도달 시에는 10%p로 타이트하게 전환
-#   (과거 +20%에서 못 팔고 급락으로 물린 경험 반영)
-TRAILING_STOP_BY_STOCK = {
-    "SK하이닉스": 15,
-    "삼성전자": 15,
-    "HLB": 10,  # 단, +20% 이상 도달했을 때만 활성화 (아래 로직에서 처리)
-}
-HLB_TRAILING_ACTIVATION_PROFIT = 20  # HLB가 이 수익률을 넘으면 트레일링 스탑 활성화
+# 손절 기준 참고
+# - 개별 반도체주: 연변동성 45% 가정 시 -15%는 기업 이슈 없이도 75% 확률로 도달하는
+#   노이즈 수준(자체 시뮬레이션 검증). -30%로 현실화해서 "진짜 지킬 수 있는 기준"으로 설정.
+# - 지수펀드(KODEX 200): 분산자산이라 변동성이 낮음, -15% 유지.
+STOP_LOSS_DEFAULT = -15  # PORTFOLIO에 stop_loss가 없는 종목의 기본값
 
 VOLATILITY_THRESHOLD = 25  # 최근 변동폭이 이 이상이면 "고변동성 장"으로 판단
 
@@ -83,8 +99,8 @@ VOLATILITY_THRESHOLD = 25  # 최근 변동폭이 이 이상이면 "고변동성 
 AGGRESSIVE_THRESHOLD = 15
 AGGRESSIVE_VOLATILITY_MIN = 20
 
-# 보유 예외 종목 (연말까지 유지, 자동 손절 로직에서 제외)
-HOLD_UNTIL_YEAREND = ["한국전력", "HLB"]
+# 연말까지 보유 방침인 종목 목록 (PORTFOLIO의 hold_until_yearend 플래그로부터 자동 생성)
+HOLD_UNTIL_YEAREND = [name for name, info in PORTFOLIO.items() if info.get("hold_until_yearend")]
 
 def get_rebalance_band(target_pct, category=None):
     """
@@ -352,12 +368,13 @@ def get_market_psychology_note(pv, shannon):
         )
     return notes
 def check_stop_loss(pv):
-    """손절 경고 체크 (연말 보유 예외 종목 제외, 종목별 손절 기준 개별 적용)"""
+    """손절 경고 체크 (연말 보유 예외 종목 제외, 종목별 손절 기준은 PORTFOLIO에서 개별 조회)"""
     warnings = []
     for item in pv["상세"]:
         if item["종목"] in HOLD_UNTIL_YEAREND:
             continue
-        threshold = STOP_LOSS_BY_STOCK.get(item["종목"], STOP_LOSS_DEFAULT)
+        stock_info = PORTFOLIO.get(item["종목"], {})
+        threshold = stock_info.get("stop_loss", STOP_LOSS_DEFAULT)
         if item["수익률"] <= threshold:
             warnings.append(f"{item['종목']}: {item['수익률']:.1f}% (기준 {threshold}% 도달)")
     return warnings
@@ -416,8 +433,9 @@ def save_peak_records(records):
 def check_trailing_stop(pv):
     """
     트레일링 스탑 체크: 종목별 역대 최고 수익률을 기록해두고,
-    거기서 설정된 폭(%p)만큼 하락하면 익절 경고를 발생.
-    HLB는 +20% 이상 도달했던 적이 있어야만 트레일링 스탑이 활성화됨.
+    PORTFOLIO에 설정된 trailing_stop 폭(%p)만큼 하락하면 익절 경고를 발생.
+    trailing_activation이 설정된 종목은 그 수익률을 넘은 적이 있어야만 활성화됨
+    (예: HLB는 +20% 이상 도달했던 적이 있어야 트레일링 스탑 작동).
     """
     records = load_peak_records()
     trailing_warnings = []
@@ -425,19 +443,19 @@ def check_trailing_stop(pv):
     for item in pv["상세"]:
         name = item["종목"]
         cur_profit = item["수익률"]
+        stock_info = PORTFOLIO.get(name, {})
 
         prev_peak = records.get(name, cur_profit)
         new_peak = max(prev_peak, cur_profit)
         records[name] = new_peak
 
-        if name == "HLB":
-            if new_peak < HLB_TRAILING_ACTIVATION_PROFIT:
-                continue  # 아직 +20%를 넘은 적이 없으면 트레일링 스탑 비활성
-            drop_pct = TRAILING_STOP_BY_STOCK.get("HLB", 10)
-        elif name in TRAILING_STOP_BY_STOCK:
-            drop_pct = TRAILING_STOP_BY_STOCK[name]
-        else:
+        drop_pct = stock_info.get("trailing_stop")
+        if drop_pct is None:
             continue  # 트레일링 스탑 미적용 종목
+
+        activation = stock_info.get("trailing_activation")
+        if activation is not None and new_peak < activation:
+            continue  # 활성화 조건(예: +20%) 미달성 시 트레일링 스탑 비활성
 
         drawdown_from_peak = new_peak - cur_profit
         if drawdown_from_peak >= drop_pct:
