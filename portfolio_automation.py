@@ -373,7 +373,7 @@ def is_quarterly_review_window():
     today = now_kst()
     quarter_starts = [(1, 1), (4, 1), (7, 1), (10, 1)]
     for month, day in quarter_starts:
-        q_start = datetime(today.year, month, day)
+        q_start = datetime(today.year, month, day, tzinfo=KST)
         delta = (today - q_start).days
         if 0 <= delta <= 3:
             return True
