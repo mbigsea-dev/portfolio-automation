@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Hyunwoo 포트폴리오 자동화 시스템 v2.0
-- 매일 아침 8시 실행 (GitHub Actions)
+- 매일 아침 7시 실행 (GitHub Actions)
 - pykrx (한국주식), yfinance (해외주식)
 - 섀넌 리밸런싱 (안정형) + 공격적 리밸런싱 (15% 기준, 변동성 자동 선정)
 - Notion 데이터베이스 저장 + Telegram 메시지 발송
@@ -10,9 +10,15 @@ Hyunwoo 포트폴리오 자동화 시스템 v2.0
 
 import os
 import requests
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import pandas as pd
 import yfinance as yf
+
+KST = timezone(timedelta(hours=9))
+
+def now_kst():
+    """GitHub Actions 서버는 UTC로 동작하므로, 한국 시간대로 명시 변환해서 사용"""
+    return datetime.now(KST)
 
 try:
     from pykrx import stock
@@ -104,17 +110,35 @@ def get_rebalance_band(target_pct, category=None):
 
 def get_korean_stock_price(ticker):
     try:
-        end = datetime.now().strftime("%Y%m%d")
-        start = (datetime.now() - pd.Timedelta(days=10)).strftime("%Y%m%d")
+        end = now_kst().strftime("%Y%m%d")
+        start = (now_kst() - pd.Timedelta(days=15)).strftime("%Y%m%d")
         data = stock.get_market_ohlcv(start, end, ticker)
         data = data[data["종가"] > 0]
-        if len(data) > 0:
-            price = int(data["종가"].iloc[-1])
-            change = float(data["등락률"].iloc[-1])
-            if abs(change) > 50:
-                print(f"경고: {ticker} 등락률 이상치 감지 ({change}%), 0으로 처리")
+        if len(data) == 0:
+            return None
+
+        price = int(data["종가"].iloc[-1])
+        change = float(data["등락률"].iloc[-1])
+
+        # 이상치 방어 1: 등락률 자체가 비정상(±50% 초과)이면 데이터 오류로 간주
+        if abs(change) > 50:
+            print(f"경고: {ticker} 등락률 이상치 감지 ({change}%), 이전 거래일 값으로 대체")
+            if len(data) >= 2:
+                price = int(data["종가"].iloc[-2])
                 change = 0.0
-            return {"price": price, "change_pct": change}
+            else:
+                return None
+
+        # 이상치 방어 2: 최근 5거래일 평균 대비 마지막 종가가 40% 이상 괴리되면
+        # 데이터 소스 오류(미확정/캐시 오염) 가능성이 높으므로 직전 확정 종가로 대체
+        if len(data) >= 5:
+            recent_avg = data["종가"].iloc[-6:-1].mean()  # 최근 종가 제외 5일 평균
+            if recent_avg > 0 and abs(price - recent_avg) / recent_avg > 0.40:
+                print(f"경고: {ticker} 마지막 종가({price:,})가 최근5일평균({recent_avg:,.0f}) 대비 40% 이상 괴리, 데이터 재검증 필요 - 직전 거래일 값 사용")
+                price = int(data["종가"].iloc[-2])
+                change = float(data["등락률"].iloc[-2])
+
+        return {"price": price, "change_pct": change}
     except Exception as e:
         print(f"Error fetching {ticker}: {e}")
     return None
@@ -136,8 +160,8 @@ def get_recent_volatility(ticker, country, days=20):
     """최근 N일간 최고-최저 변동폭(%) 계산 - 공격적 리밸런싱 종목 자동 선정용"""
     try:
         if country == "KR":
-            end = datetime.now().strftime("%Y%m%d")
-            start = (datetime.now() - pd.Timedelta(days=days*1.5)).strftime("%Y%m%d")
+            end = now_kst().strftime("%Y%m%d")
+            start = (now_kst() - pd.Timedelta(days=days*1.5)).strftime("%Y%m%d")
             data = stock.get_market_ohlcv(start, end, ticker)
             if len(data) > 0:
                 high = data["고가"].max()
@@ -346,7 +370,7 @@ def is_quarterly_review_window():
     분기 시작일(1/1, 4/1, 7/1, 10/1)로부터 3영업일 이내인지 확인.
     이 기간에는 손절 대상 종목의 기준 자체를 재검토하라는 안내를 추가로 띄움.
     """
-    today = datetime.now()
+    today = now_kst()
     quarter_starts = [(1, 1), (4, 1), (7, 1), (10, 1)]
     for month, day in quarter_starts:
         q_start = datetime(today.year, month, day)
@@ -450,7 +474,7 @@ def save_to_notion(pv, shannon, aggressive, stop_warnings, trailing_warnings):
     payload = {
         "parent": {"database_id": NOTION_DATABASE_ID},
         "properties": {
-            "날짜": {"title": [{"text": {"content": datetime.now().strftime("%Y-%m-%d")}}]},
+            "날짜": {"title": [{"text": {"content": now_kst().strftime("%Y-%m-%d")}}]},
             "총자산": {"number": round(pv["총자산"] + pv["현금"])},
             "수익률": {"number": round(pv["수익률"], 2)},
             "일간수익": {"number": round(sum(i["평가금"] * i["일간등락"] / 100 for i in pv["상세"]))},
@@ -478,7 +502,7 @@ def send_telegram_message(pv, shannon, aggressive, stop_warnings, trailing_warni
         print("Telegram 설정 없음, 스킵")
         return False
 
-    today = datetime.now().strftime("%Y년 %m월 %d일 (%a)")
+    today = now_kst().strftime("%Y년 %m월 %d일 (%a)")
     daily_pl = sum(i["평가금"] * i["일간등락"] / 100 for i in pv["상세"])
     total_with_cash = pv["총자산"] + pv["현금"]
 
@@ -582,7 +606,7 @@ def send_telegram_message(pv, shannon, aggressive, stop_warnings, trailing_warni
 # ==================== 메인 실행 ====================
 
 if __name__ == "__main__":
-    print(f"포트폴리오 자동화 시작: {datetime.now()}")
+    print(f"포트폴리오 자동화 시작: {now_kst()}")
 
     pv = calculate_portfolio_value()
     shannon = calculate_shannon_rebalancing(pv)
