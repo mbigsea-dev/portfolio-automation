@@ -62,7 +62,7 @@ DEFAULT_PORTFOLIO = {
     },
     "한국전력": {
         "ticker": "015760", "shares": 137, "purchase_price": 44079,
-        "country": "KR", "category": "전력인프라",
+        "country": "KR", "category": "위성종목",
         "hold_until_yearend": True,
     },
     "삼성전자": {
@@ -72,12 +72,12 @@ DEFAULT_PORTFOLIO = {
     },
     "HLB": {
         "ticker": "028300", "shares": 75, "purchase_price": 42953,
-        "country": "KR", "category": "반도체",
+        "country": "KR", "category": "위성종목",
         "hold_until_yearend": True, "trailing_stop": 10, "trailing_activation": 20,
     },
     "하이브": {
         "ticker": "352820", "shares": 5, "purchase_price": 170400,
-        "country": "KR", "category": "ETC/기타",
+        "country": "KR", "category": "위성종목",
     },
 }
 
@@ -85,12 +85,14 @@ DEFAULT_PORTFOLIO = {
 # 근거: AI/HBM 슈퍼사이클은 견조하나 2026 하반기 반도체 쏠림 완화 전망 반영,
 #       KODEX 200으로 변동성 완충, 전력인프라는 AI 데이터센터 전력수요 테마 유지,
 #       ETC/기타는 하이브 등 소규모 개별 매수 종목을 위한 여유 슬롯(2026-08-01 신설)
+# 목표 자산 배분 (%) - 2026-08-03 전면 개편
+# 구조: 현금(안전판) / 지수펀드(KODEX200, 변동성 완충) / 반도체(핵심 성장축) /
+#       위성종목(전력·바이오·엔터 등 테마 분산, 향후 조선·금융 등 추가 가능)
 TARGET_ALLOCATION = {
-    "반도체": 40,
-    "지수펀드": 30,
-    "전력인프라": 10,
-    "ETC/기타": 5,
-    "현금": 15,
+    "지수펀드": 20,
+    "반도체": 30,
+    "위성종목": 30,
+    "현금": 20,
 }
 
 DEFAULT_CASH_AVAILABLE = 3178446  # 토스 계좌 실제 보유 현금 (2026-08-01 기준, 하이브 신규매수 반영) - Notion 미설정시 폴백
@@ -124,7 +126,7 @@ def get_rebalance_band(target_pct, category=None):
     20% 미만이면 목표치의 상대 25% 밴드를 적용.
     (Swedroe 5/25 Rule, Bogleheads 표준 관행 반영)
 
-    보정: 반도체 카테고리는 내부 3종목(SK하이닉스/삼성전자/HLB)이
+    보정: 반도체 카테고리는 내부 2종목(SK하이닉스/삼성전자)이
     같은 업종 매크로 요인에 함께 반응해 상관계수가 높다(추정 0.8+).
     분산투자처럼 보이지만 실질 리스크는 집중에 가까우므로,
     표준 밴드보다 타이트한 4%p를 적용해 더 자주 점검하도록 함.
