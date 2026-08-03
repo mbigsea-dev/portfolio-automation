@@ -27,6 +27,8 @@ jobs:
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+          NOTION_HOLDINGS_DATABASE_ID: ${{ secrets.NOTION_HOLDINGS_DATABASE_ID }}
+          NOTION_CASH_PAGE_ID: ${{ secrets.NOTION_CASH_PAGE_ID }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python portfolio_automation.py
