@@ -27,11 +27,15 @@ except ImportError:
 
 # ==================== 환경변수 (GitHub Secrets에서 로드) ====================
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
-NOTION_DATABASE_ID = os.environ.get("NOTION_DATABASE_ID")
+NOTION_DATABASE_ID = os.environ.get("NOTION_DATABASE_ID")  # 리포트 기록용 DB
+NOTION_HOLDINGS_DATABASE_ID = os.environ.get("NOTION_HOLDINGS_DATABASE_ID")  # 보유종목 입력용 DB
+NOTION_CASH_PAGE_ID = os.environ.get("NOTION_CASH_PAGE_ID")  # 현금 보유액 입력용 페이지
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-# ==================== 포트폴리오 설정 (종목당 한 블록으로 통합) ====================
+# ==================== 포트폴리오 설정 (Notion 연동 시 폴백용 기본값) ====================
+# Notion 보유종목 DB가 설정되어 있으면 실행 시 그 값을 우선 사용합니다.
+# Notion 조회가 실패하거나 설정이 없으면 아래 값을 그대로 사용합니다(안전장치).
 # 매매(매수/매도) 시 이 블록의 shares, purchase_price만 수정하면 됩니다.
 # 신규 종목 매수 시 같은 형식으로 한 줄 추가, 전량 매도 시 해당 줄 삭제하면 됩니다.
 #
@@ -45,7 +49,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 #   trailing_stop    : 트레일링 스탑 폭(%p). 미지정 시 트레일링 스탑 미적용
 #   trailing_activation : 이 수익률(%) 이상 도달해야 트레일링 스탑 활성화 (HLB처럼 익절 구간에서만 걸고 싶을 때)
 #   hold_until_yearend : True면 연말까지 손절 로직에서 제외 (기존 방침 유지 종목)
-PORTFOLIO = {
+DEFAULT_PORTFOLIO = {
     "KODEX 200": {
         "ticker": "069500", "shares": 86, "purchase_price": 72276,
         "country": "KR", "category": "지수펀드",
@@ -71,19 +75,29 @@ PORTFOLIO = {
         "country": "KR", "category": "반도체",
         "hold_until_yearend": True, "trailing_stop": 10, "trailing_activation": 20,
     },
+    "하이브": {
+        "ticker": "352820", "shares": 5, "purchase_price": 170400,
+        "country": "KR", "category": "ETC/기타",
+    },
 }
 
 # 목표 자산 배분 (%) - Claude 추천안
 # 근거: AI/HBM 슈퍼사이클은 견조하나 2026 하반기 반도체 쏠림 완화 전망 반영,
-#       KODEX 200으로 변동성 완충, 전력인프라는 AI 데이터센터 전력수요 테마 유지
+#       KODEX 200으로 변동성 완충, 전력인프라는 AI 데이터센터 전력수요 테마 유지,
+#       ETC/기타는 하이브 등 소규모 개별 매수 종목을 위한 여유 슬롯(2026-08-01 신설)
 TARGET_ALLOCATION = {
     "반도체": 40,
     "지수펀드": 30,
     "전력인프라": 10,
-    "현금": 20,
+    "ETC/기타": 5,
+    "현금": 15,
 }
 
-CASH_AVAILABLE = 4030565  # 토스 계좌 실제 보유 현금 (2026-07-31 기준, 한미반도체 전량 손절 매도 반영)
+DEFAULT_CASH_AVAILABLE = 3178446  # 토스 계좌 실제 보유 현금 (2026-08-01 기준, 하이브 신규매수 반영) - Notion 미설정시 폴백
+
+# 실행 시점의 실제 포트폴리오/현금 (기본값은 DEFAULT_*, main()에서 Notion 로드 성공 시 덮어씀)
+PORTFOLIO = DEFAULT_PORTFOLIO
+CASH_AVAILABLE = DEFAULT_CASH_AVAILABLE
 
 MONTHLY_INVESTMENT = 250000
 
@@ -100,7 +114,9 @@ AGGRESSIVE_THRESHOLD = 15
 AGGRESSIVE_VOLATILITY_MIN = 20
 
 # 연말까지 보유 방침인 종목 목록 (PORTFOLIO의 hold_until_yearend 플래그로부터 자동 생성)
-HOLD_UNTIL_YEAREND = [name for name, info in PORTFOLIO.items() if info.get("hold_until_yearend")]
+def get_hold_until_yearend():
+    """연말까지 보유 방침인 종목 목록 (PORTFOLIO의 hold_until_yearend 플래그로부터 매번 계산)"""
+    return [name for name, info in PORTFOLIO.items() if info.get("hold_until_yearend")]
 
 def get_rebalance_band(target_pct, category=None):
     """
@@ -279,7 +295,7 @@ def calculate_share_level_suggestions(pv, shannon):
             continue
 
         for item in cat_items:
-            if item["종목"] in HOLD_UNTIL_YEAREND:
+            if item["종목"] in get_hold_until_yearend():
                 continue  # 연말 보유 방침 종목은 매수/매도 제안에서 제외
             weight = item["평가금"] / cat_total_value
             item_deviation_value = c["편차금액"] * weight
@@ -371,7 +387,7 @@ def check_stop_loss(pv):
     """손절 경고 체크 (연말 보유 예외 종목 제외, 종목별 손절 기준은 PORTFOLIO에서 개별 조회)"""
     warnings = []
     for item in pv["상세"]:
-        if item["종목"] in HOLD_UNTIL_YEAREND:
+        if item["종목"] in get_hold_until_yearend():
             continue
         stock_info = PORTFOLIO.get(item["종목"], {})
         threshold = stock_info.get("stop_loss", STOP_LOSS_DEFAULT)
@@ -466,6 +482,124 @@ def check_trailing_stop(pv):
 
     save_peak_records(records)
     return trailing_warnings
+
+# ==================== Notion에서 보유종목/현금 읽어오기 ====================
+
+def load_portfolio_from_notion():
+    """
+    Notion 보유종목 DB에서 종목 정보를 읽어와 PORTFOLIO 형식으로 변환.
+    실패하거나 미설정이면 None을 반환 (호출부에서 DEFAULT_PORTFOLIO로 폴백).
+
+    Notion DB 속성 요구사항:
+      종목명(Title), 티커(Text), 수량(Number), 평단가(Number), 카테고리(Select),
+      연말보유(Checkbox), 손절기준(Number, 선택), 트레일링스탑(Number, 선택), 트레일링활성화(Number, 선택)
+    """
+    if not NOTION_TOKEN or not NOTION_HOLDINGS_DATABASE_ID:
+        return None
+
+    url = f"https://api.notion.com/v1/databases/{NOTION_HOLDINGS_DATABASE_ID}/query"
+    headers = {
+        "Authorization": f"Bearer {NOTION_TOKEN}",
+        "Content-Type": "application/json",
+        "Notion-Version": "2022-06-28",
+    }
+
+    try:
+        resp = requests.post(url, headers=headers, json={})
+        if resp.status_code != 200:
+            print(f"Notion 보유종목 조회 실패: {resp.status_code} {resp.text}")
+            return None
+
+        results = resp.json().get("results", [])
+        portfolio = {}
+        for page in results:
+            props = page.get("properties", {})
+
+            name_list = props.get("종목명", {}).get("title", [])
+            if not name_list:
+                continue
+            name = name_list[0]["text"]["content"].strip()
+            if not name:
+                continue
+
+            ticker_list = props.get("티커", {}).get("rich_text", [])
+            ticker = ticker_list[0]["text"]["content"].strip() if ticker_list else ""
+
+            shares = props.get("수량", {}).get("number")
+            purchase_price = props.get("평단가", {}).get("number")
+            if shares is None or purchase_price is None or not ticker:
+                print(f"경고: Notion '{name}' 항목에 필수값 누락, 건너뜀")
+                continue
+
+            category = props.get("카테고리", {}).get("select", {})
+            category = category.get("name", "ETC/기타") if category else "ETC/기타"
+
+            hold_flag = props.get("연말보유", {}).get("checkbox", False)
+            stop_loss = props.get("손절기준", {}).get("number")
+            trailing_stop = props.get("트레일링스탑", {}).get("number")
+            trailing_activation = props.get("트레일링활성화", {}).get("number")
+
+            entry = {
+                "ticker": ticker, "shares": int(shares), "purchase_price": int(purchase_price),
+                "country": "KR", "category": category,
+            }
+            if hold_flag:
+                entry["hold_until_yearend"] = True
+            if stop_loss is not None:
+                entry["stop_loss"] = stop_loss
+            if trailing_stop is not None:
+                entry["trailing_stop"] = trailing_stop
+            if trailing_activation is not None:
+                entry["trailing_activation"] = trailing_activation
+
+            portfolio[name] = entry
+
+        if not portfolio:
+            print("Notion 보유종목 DB가 비어있음, 폴백 사용")
+            return None
+
+        print(f"Notion에서 보유종목 {len(portfolio)}개 로드 완료")
+        return portfolio
+    except Exception as e:
+        print(f"Notion 보유종목 조회 중 오류: {e}, 폴백 사용")
+        return None
+
+def load_cash_from_notion():
+    """
+    Notion 페이지에서 현금 보유액을 읽어옴 (페이지 본문 첫 줄이 숫자여야 함).
+    실패하거나 미설정이면 None을 반환 (호출부에서 DEFAULT_CASH_AVAILABLE로 폴백).
+    """
+    if not NOTION_TOKEN or not NOTION_CASH_PAGE_ID:
+        return None
+
+    url = f"https://api.notion.com/v1/blocks/{NOTION_CASH_PAGE_ID}/children"
+    headers = {
+        "Authorization": f"Bearer {NOTION_TOKEN}",
+        "Notion-Version": "2022-06-28",
+    }
+
+    try:
+        resp = requests.get(url, headers=headers)
+        if resp.status_code != 200:
+            print(f"Notion 현금 조회 실패: {resp.status_code} {resp.text}")
+            return None
+
+        blocks = resp.json().get("results", [])
+        for block in blocks:
+            block_type = block.get("type")
+            rich_text = block.get(block_type, {}).get("rich_text", [])
+            if not rich_text:
+                continue
+            text = rich_text[0]["text"]["content"].strip().replace(",", "").replace("원", "")
+            if text.isdigit():
+                cash = int(text)
+                print(f"Notion에서 현금 {cash:,}원 로드 완료")
+                return cash
+        print("Notion 현금 페이지에서 숫자를 찾지 못함, 폴백 사용")
+        return None
+    except Exception as e:
+        print(f"Notion 현금 조회 중 오류: {e}, 폴백 사용")
+        return None
 
 # ==================== Notion 저장 ====================
 
@@ -573,7 +707,9 @@ def send_telegram_message(pv, shannon, aggressive, stop_warnings, trailing_warni
         msg += "---------------------\n"
         for w in stop_warnings:
             msg += f"🚨 {w}\n"
-        msg += "(한국전력·HLB는 연말 보유 방침에 따라 제외)\n"
+        hold_list = get_hold_until_yearend()
+        if hold_list:
+            msg += f"({'·'.join(hold_list)}는 연말 보유 방침에 따라 제외)\n"
         quarterly_note = get_quarterly_review_note(stop_warnings)
         if quarterly_note:
             msg += f"\n📅 분기 재검토: {quarterly_note}\n"
@@ -620,8 +756,18 @@ def send_telegram_message(pv, shannon, aggressive, stop_warnings, trailing_warni
 
 # ==================== 메인 실행 ====================
 
-if __name__ == "__main__":
+def main():
+    global PORTFOLIO, CASH_AVAILABLE
+
     print(f"포트폴리오 자동화 시작: {now_kst()}")
+
+    # Notion에서 보유종목/현금 로드 시도, 실패하면 DEFAULT_* 값 그대로 사용(안전장치)
+    notion_portfolio = load_portfolio_from_notion()
+    if notion_portfolio:
+        PORTFOLIO = notion_portfolio
+    notion_cash = load_cash_from_notion()
+    if notion_cash is not None:
+        CASH_AVAILABLE = notion_cash
 
     pv = calculate_portfolio_value()
     shannon = calculate_shannon_rebalancing(pv)
@@ -635,3 +781,6 @@ if __name__ == "__main__":
     send_telegram_message(pv, shannon, aggressive, stop_warnings, trailing_warnings, news, psychology_notes)
 
     print("완료")
+
+if __name__ == "__main__":
+    main()
