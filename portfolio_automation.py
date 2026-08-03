@@ -187,6 +187,21 @@ def get_foreign_stock_price(ticker):
         print(f"Error fetching {ticker}: {e}")
     return None
 
+def get_usd_krw_rate():
+    """
+    현재 USD/KRW 환율을 yfinance로 조회. 실패 시 최근 평균 수준인 1400원으로 폴백.
+    (해외주식 평가금/원금을 원화로 환산하는 데 사용 - 통화 단위를 섞어 합산하면
+    총자산 계산이 완전히 틀어지므로 반드시 환산이 필요함)
+    """
+    try:
+        data = yf.Ticker("KRW=X")
+        hist = data.history(period="2d")
+        if len(hist) > 0:
+            return float(hist["Close"].iloc[-1])
+    except Exception as e:
+        print(f"환율 조회 실패: {e}, 폴백 환율(1400원) 사용")
+    return 1400.0
+
 def get_recent_volatility(ticker, country, days=20):
     """최근 N일간 최고-최저 변동폭(%) 계산 - 공격적 리밸런싱 종목 자동 선정용"""
     try:
@@ -215,15 +230,23 @@ def calculate_portfolio_value():
     total_cost = 0
     portfolio_data = []
     category_totals = {}
+    usd_krw = None  # 필요할 때만 조회 (해외종목이 없으면 API 호출 생략)
 
     for name, info in PORTFOLIO.items():
-        price_data = get_korean_stock_price(info["ticker"]) if info["country"] == "KR" else get_foreign_stock_price(info["ticker"])
+        is_foreign = info["country"] != "KR"
+        price_data = get_korean_stock_price(info["ticker"]) if not is_foreign else get_foreign_stock_price(info["ticker"])
         if not price_data:
             continue
 
-        current_price = price_data["price"]
-        current_value = current_price * info["shares"]
-        cost = info["purchase_price"] * info["shares"]
+        current_price = price_data["price"]  # 원화 또는 달러(표시용 원래 통화 그대로)
+        fx_rate = 1.0
+        if is_foreign:
+            if usd_krw is None:
+                usd_krw = get_usd_krw_rate()
+            fx_rate = usd_krw
+
+        current_value = current_price * info["shares"] * fx_rate  # 항상 원화로 환산해서 합산
+        cost = info["purchase_price"] * info["shares"] * fx_rate
         profit = current_value - cost
         profit_rate = (profit / cost * 100) if cost > 0 else 0
         volatility = get_recent_volatility(info["ticker"], info["country"])
@@ -238,6 +261,7 @@ def calculate_portfolio_value():
             "평가금": current_value, "원금": cost, "수익금": profit,
             "수익률": profit_rate, "일간등락": price_data["change_pct"],
             "변동성20일": volatility, "카테고리": cat,
+            "통화": "USD" if is_foreign else "KRW",
         })
 
     total_profit = total_value - total_cost
@@ -493,8 +517,11 @@ def load_portfolio_from_notion():
     실패하거나 미설정이면 None을 반환 (호출부에서 DEFAULT_PORTFOLIO로 폴백).
 
     Notion DB 속성 요구사항:
-      종목명(Title), 티커(Text), 수량(Number), 평단가(Number), 카테고리(Select),
+      종목명(Title), 티커(Text), 수량(Number), 평단가(Number), 카테고리(Select), 국가(Select: KR/US),
       연말보유(Checkbox), 손절기준(Number, 선택), 트레일링스탑(Number, 선택), 트레일링활성화(Number, 선택)
+
+    평단가 입력 기준: 국가가 KR이면 원화, US면 반드시 달러(USD) 기준으로 입력해야 함.
+    (해외주식은 yfinance가 달러로 가격을 반환하므로, 원화로 입력하면 손익 계산이 완전히 틀어짐)
     """
     if not NOTION_TOKEN or not NOTION_HOLDINGS_DATABASE_ID:
         return None
@@ -536,14 +563,22 @@ def load_portfolio_from_notion():
             category = props.get("카테고리", {}).get("select", {})
             category = category.get("name", "ETC/기타") if category else "ETC/기타"
 
+            country_select = props.get("국가", {}).get("select", {})
+            country = country_select.get("name", "KR") if country_select else "KR"
+            country = country.upper().strip()
+            if country not in ("KR", "US"):
+                print(f"경고: '{name}' 국가값 '{country}' 인식 불가, KR로 처리")
+                country = "KR"
+
             hold_flag = props.get("연말보유", {}).get("checkbox", False)
             stop_loss = props.get("손절기준", {}).get("number")
             trailing_stop = props.get("트레일링스탑", {}).get("number")
             trailing_activation = props.get("트레일링활성화", {}).get("number")
 
             entry = {
-                "ticker": ticker, "shares": int(shares), "purchase_price": int(purchase_price),
-                "country": "KR", "category": category,
+                "ticker": ticker, "shares": int(shares),
+                "purchase_price": int(purchase_price) if country == "KR" else float(purchase_price),
+                "country": country, "category": category,
             }
             if hold_flag:
                 entry["hold_until_yearend"] = True
@@ -682,7 +717,9 @@ def send_telegram_message(pv, shannon, aggressive, stop_warnings, trailing_warni
         cat_items = [i for i in pv["상세"] if i["카테고리"] == c["카테고리"]]
         for item in cat_items:
             item_pct = round(item["평가금"] / total_with_cash * 100, 1) if total_with_cash > 0 else 0
-            msg += f"    - {item['종목']}: {item_pct}% ({item['수익률']:+.1f}%) 현재가 {item['현재가']:,.0f}원\n"
+            currency_label = "달러" if item.get("통화") == "USD" else "원"
+            price_str = f"{item['현재가']:,.2f}{currency_label}" if item.get("통화") == "USD" else f"{item['현재가']:,.0f}{currency_label}"
+            msg += f"    - {item['종목']}: {item_pct}% ({item['수익률']:+.1f}%) 현재가 {price_str}\n"
     msg += "\n"
 
     # 3. 오늘의 액션 아이템 (구체적 매수/매도 주식수 제시)
